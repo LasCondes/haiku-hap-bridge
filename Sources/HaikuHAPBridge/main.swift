@@ -509,6 +509,76 @@ final class MultiBridgeDelegate: DeviceDelegate {
     }
 }
 
+func runCommand(_ executable: String, _ arguments: [String], timeout: TimeInterval = 6) -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+
+    do {
+        try process.run()
+    } catch {
+        return ""
+    }
+
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning, Date() < deadline {
+        usleep(100_000)
+    }
+    if process.isRunning { process.terminate() }
+
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
+func discoverFans() -> [FanConfig] {
+    let browse = runCommand("/usr/bin/dns-sd", ["-B", "_http._tcp", "local."], timeout: 6)
+    let lines = browse.split(separator: "\n").map(String.init)
+
+    var names: [String] = []
+    for line in lines where line.contains("_http._tcp") {
+        if let range = line.range(of: "_http._tcp.") {
+            let raw = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+            if !raw.isEmpty, raw.lowercased().contains("fan") {
+                names.append(raw)
+            }
+        }
+    }
+
+    let uniqueNames = Array(Set(names)).sorted()
+    var fans: [FanConfig] = []
+
+    for name in uniqueNames {
+        let lookup = runCommand("/usr/bin/dns-sd", ["-L", name, "_http._tcp", "local."], timeout: 4)
+        guard let hostMatch = lookup.range(of: "can be reached at ", options: .caseInsensitive) else { continue }
+        let suffix = lookup[hostMatch.upperBound...]
+        guard let dotRange = suffix.range(of: ".:") else { continue }
+        let host = String(suffix[..<dotRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let portRange = suffix.range(of: ".:(\\d+)", options: .regularExpression),
+              let port = Int(String(suffix[portRange]).replacingOccurrences(of: ".:", with: "")) else { continue }
+
+        let ipLookup = runCommand("/usr/bin/dns-sd", ["-G", "v4", host + ".local"], timeout: 3)
+        let ip = ipLookup
+            .split(separator: "\n")
+            .map(String.init)
+            .first(where: { $0.contains(" Add ") && $0.contains("\t") })?
+            .split(separator: "\t")
+            .last
+            .map(String.init)
+            ?? host
+
+        let baseName = name.replacingOccurrences(of: "\\s+\\d{2}:\\d{2}:\\d{2}$", with: "", options: .regularExpression)
+        fans.append(FanConfig(name: baseName, fanHost: ip, fanPort: port, lightName: nil, temperatureName: nil, humidityName: nil))
+    }
+
+    return fans
+}
+
 func loadConfig(path: String) throws -> BridgeConfig {
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     return try JSONDecoder().decode(BridgeConfig.self, from: data)
@@ -517,6 +587,18 @@ func loadConfig(path: String) throws -> BridgeConfig {
 let args = Array(CommandLine.arguments.dropFirst())
 let debugTelemetry = args.contains("--debug-telemetry")
 let printDeviceInfo = args.contains("--print-device-info")
+let discoverMode = args.contains("--discover")
+
+if discoverMode {
+    let fans = discoverFans()
+    let suggested = BridgeConfig(bridgeName: "Haiku Swift Bridge", setupCode: "518-08-275", fans: fans)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let data = try encoder.encode(suggested)
+    print(String(data: data, encoding: .utf8) ?? "{}")
+    exit(0)
+}
+
 let configPath = args.first(where: { !$0.hasPrefix("--") }) ?? "Config/bridge-config.json"
 let config = try loadConfig(path: configPath)
 

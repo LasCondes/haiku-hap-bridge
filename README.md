@@ -57,6 +57,11 @@ One-shot device info mode (prints make/model/software/firmware/temp/humidity for
 .build/release/haiku-hap-bridge Config/bridge-config.json --print-device-info
 ```
 
+Auto-discovery mode (finds Haiku-like fan services on LAN and prints a suggested config JSON):
+```bash
+.build/release/haiku-hap-bridge --discover
+```
+
 Telemetry output includes:
 - fan state + speed
 - light level
