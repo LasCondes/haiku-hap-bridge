@@ -50,6 +50,11 @@ Debug telemetry mode:
 .build/release/haiku-hap-bridge Config/bridge-config.json --debug-telemetry
 ```
 
+One-shot device info mode (prints make/model/software/firmware/temp/humidity and exits):
+```bash
+.build/release/haiku-hap-bridge Config/bridge-config.json --print-device-info
+```
+
 Telemetry output includes:
 - fan state + speed
 - light level

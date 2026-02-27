@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 import HAP
 
 #if os(macOS)
@@ -487,9 +488,29 @@ func loadConfig(path: String) throws -> BridgeConfig {
 
 let args = Array(CommandLine.arguments.dropFirst())
 let debugTelemetry = args.contains("--debug-telemetry")
+let printDeviceInfo = args.contains("--print-device-info")
 let configPath = args.first(where: { !$0.hasPrefix("--") }) ?? "Config/bridge-config.json"
 let config = try loadConfig(path: configPath)
 let api = HaikuTCPAPI(config: config)
+
+if printDeviceInfo {
+    Task {
+        do {
+            let status = try await api.status()
+            print("make=\((status["make"] as? String) ?? "n/a")")
+            print("model=\((status["model"] as? String) ?? "n/a")")
+            print("softwareVersion=\((status["softwareVersion"] as? String) ?? "n/a")")
+            print("firmwareVersion=\((status["firmwareVersion"] as? String) ?? "n/a")")
+            print("temperatureC=\((status["tempC"] as? Double).map { String(format: "%.2f", $0) } ?? "n/a")")
+            print("humidity=\((status["humidity"] as? Double).map { String(format: "%.1f", $0) } ?? "n/a")")
+            exit(0)
+        } catch {
+            fputs("Device info error: \(error)\n", stderr)
+            exit(1)
+        }
+    }
+    dispatchMain()
+}
 
 let fanService = Service.FanV2(characteristics: [.name(config.fanName), .rotationSpeed()])
 let fanAccessory = Accessory(
