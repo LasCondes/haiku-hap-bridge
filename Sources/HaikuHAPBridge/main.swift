@@ -8,15 +8,19 @@ import Darwin
 import Glibc
 #endif
 
-struct BridgeConfig: Codable {
+struct FanConfig: Codable {
+    let name: String
     let fanHost: String
     let fanPort: Int
+    let lightName: String?
+    let temperatureName: String?
+    let humidityName: String?
+}
+
+struct BridgeConfig: Codable {
     let bridgeName: String
-    let fanName: String
-    let lightName: String
-    let temperatureName: String
-    let humidityName: String
     let setupCode: String
+    let fans: [FanConfig]
 }
 
 struct FanCommand: Codable {
@@ -45,10 +49,10 @@ struct FanStatus {
 }
 
 final class HaikuTCPAPI {
-    private let config: BridgeConfig
+    private let config: FanConfig
     private let prefix: [UInt8] = [18, 7, 18, 5, 26, 3]
 
-    init(config: BridgeConfig) {
+    init(config: FanConfig) {
         self.config = config
     }
 
@@ -479,6 +483,30 @@ final class BridgeDelegate: DeviceDelegate {
             fputs("Status refresh error: \(error)\n", stderr)
         }
     }
+
+    func handles(service: Service) -> Bool {
+        service === fanService || service === lightService || service === tempService || service === humidityService || service === autoService || service === whooshService || service === ecoService
+    }
+}
+
+final class MultiBridgeDelegate: DeviceDelegate {
+    private let delegates: [BridgeDelegate]
+
+    init(delegates: [BridgeDelegate]) {
+        self.delegates = delegates
+    }
+
+    func characteristic<T>(_ characteristic: GenericCharacteristic<T>, ofService service: Service, ofAccessory accessory: Accessory, didChangeValue newValue: T?) {
+        for delegate in delegates where delegate.handles(service: service) {
+            delegate.characteristic(characteristic, ofService: service, ofAccessory: accessory, didChangeValue: newValue)
+        }
+    }
+
+    func refreshAll() async {
+        for delegate in delegates {
+            await delegate.refreshFromFan()
+        }
+    }
 }
 
 func loadConfig(path: String) throws -> BridgeConfig {
@@ -491,18 +519,27 @@ let debugTelemetry = args.contains("--debug-telemetry")
 let printDeviceInfo = args.contains("--print-device-info")
 let configPath = args.first(where: { !$0.hasPrefix("--") }) ?? "Config/bridge-config.json"
 let config = try loadConfig(path: configPath)
-let api = HaikuTCPAPI(config: config)
+
+if config.fans.isEmpty {
+    fputs("Config error: fans array is empty\n", stderr)
+    exit(1)
+}
 
 if printDeviceInfo {
     Task {
         do {
-            let status = try await api.status()
-            print("make=\((status["make"] as? String) ?? "n/a")")
-            print("model=\((status["model"] as? String) ?? "n/a")")
-            print("softwareVersion=\((status["softwareVersion"] as? String) ?? "n/a")")
-            print("firmwareVersion=\((status["firmwareVersion"] as? String) ?? "n/a")")
-            print("temperatureC=\((status["tempC"] as? Double).map { String(format: "%.2f", $0) } ?? "n/a")")
-            print("humidity=\((status["humidity"] as? Double).map { String(format: "%.1f", $0) } ?? "n/a")")
+            for fan in config.fans {
+                let api = HaikuTCPAPI(config: fan)
+                let status = try await api.status()
+                print("[\(fan.name)]")
+                print("make=\((status["make"] as? String) ?? "n/a")")
+                print("model=\((status["model"] as? String) ?? "n/a")")
+                print("softwareVersion=\((status["softwareVersion"] as? String) ?? "n/a")")
+                print("firmwareVersion=\((status["firmwareVersion"] as? String) ?? "n/a")")
+                print("temperatureC=\((status["tempC"] as? Double).map { String(format: "%.2f", $0) } ?? "n/a")")
+                print("humidity=\((status["humidity"] as? Double).map { String(format: "%.1f", $0) } ?? "n/a")")
+                print("")
+            }
             exit(0)
         } catch {
             fputs("Device info error: \(error)\n", stderr)
@@ -512,69 +549,84 @@ if printDeviceInfo {
     dispatchMain()
 }
 
-let fanService = Service.FanV2(characteristics: [.name(config.fanName), .rotationSpeed()])
-let fanAccessory = Accessory(
-    info: Service.Info(name: config.fanName, serialNumber: "HAIKU-FAN-001"),
-    type: .fan,
-    services: [fanService]
-)
+var accessories: [Accessory] = []
+var delegates: [BridgeDelegate] = []
 
-let lightService = Service.Lightbulb(characteristics: [.name(config.lightName), .brightness()])
-let lightAccessory = Accessory(
-    info: Service.Info(name: config.lightName, serialNumber: "HAIKU-LIGHT-001"),
-    type: .lightbulb,
-    services: [lightService]
-)
+for (idx, fan) in config.fans.enumerated() {
+    let suffix = String(format: "%03d", idx + 1)
+    let api = HaikuTCPAPI(config: fan)
 
-let tempService = Service.TemperatureSensor(characteristics: [.name(config.temperatureName)])
-let tempAccessory = Accessory(
-    info: Service.Info(name: config.temperatureName, serialNumber: "HAIKU-TEMP-001"),
-    type: .sensor,
-    services: [tempService]
-)
+    let fanService = Service.FanV2(characteristics: [.name(fan.name), .rotationSpeed()])
+    let fanAccessory = Accessory(
+        info: Service.Info(name: fan.name, serialNumber: "HAIKU-FAN-\(suffix)"),
+        type: .fan,
+        services: [fanService]
+    )
 
-let humidityService = Service.HumiditySensor(characteristics: [.name(config.humidityName)])
-let humidityAccessory = Accessory(
-    info: Service.Info(name: config.humidityName, serialNumber: "HAIKU-HUM-001"),
-    type: .sensor,
-    services: [humidityService]
-)
+    let lightName = fan.lightName ?? "\(fan.name) Light"
+    let lightService = Service.Lightbulb(characteristics: [.name(lightName), .brightness()])
+    let lightAccessory = Accessory(
+        info: Service.Info(name: lightName, serialNumber: "HAIKU-LIGHT-\(suffix)"),
+        type: .lightbulb,
+        services: [lightService]
+    )
 
-let autoService = Service.Switch(characteristics: [.name("\(config.fanName) Auto")])
-let autoAccessory = Accessory(
-    info: Service.Info(name: "\(config.fanName) Auto", serialNumber: "HAIKU-AUTO-001"),
-    type: .switch,
-    services: [autoService]
-)
+    let tempName = fan.temperatureName ?? "\(fan.name) Temperature"
+    let tempService = Service.TemperatureSensor(characteristics: [.name(tempName)])
+    let tempAccessory = Accessory(
+        info: Service.Info(name: tempName, serialNumber: "HAIKU-TEMP-\(suffix)"),
+        type: .sensor,
+        services: [tempService]
+    )
 
-let whooshService = Service.Switch(characteristics: [.name("\(config.fanName) Whoosh")])
-let whooshAccessory = Accessory(
-    info: Service.Info(name: "\(config.fanName) Whoosh", serialNumber: "HAIKU-WHOOSH-001"),
-    type: .switch,
-    services: [whooshService]
-)
+    let humidityName = fan.humidityName ?? "\(fan.name) Humidity"
+    let humidityService = Service.HumiditySensor(characteristics: [.name(humidityName)])
+    let humidityAccessory = Accessory(
+        info: Service.Info(name: humidityName, serialNumber: "HAIKU-HUM-\(suffix)"),
+        type: .sensor,
+        services: [humidityService]
+    )
 
-let ecoService = Service.Switch(characteristics: [.name("\(config.fanName) Eco")])
-let ecoAccessory = Accessory(
-    info: Service.Info(name: "\(config.fanName) Eco", serialNumber: "HAIKU-ECO-001"),
-    type: .switch,
-    services: [ecoService]
-)
+    let autoService = Service.Switch(characteristics: [.name("\(fan.name) Auto")])
+    let autoAccessory = Accessory(
+        info: Service.Info(name: "\(fan.name) Auto", serialNumber: "HAIKU-AUTO-\(suffix)"),
+        type: .switch,
+        services: [autoService]
+    )
+
+    let whooshService = Service.Switch(characteristics: [.name("\(fan.name) Whoosh")])
+    let whooshAccessory = Accessory(
+        info: Service.Info(name: "\(fan.name) Whoosh", serialNumber: "HAIKU-WHOOSH-\(suffix)"),
+        type: .switch,
+        services: [whooshService]
+    )
+
+    let ecoService = Service.Switch(characteristics: [.name("\(fan.name) Eco")])
+    let ecoAccessory = Accessory(
+        info: Service.Info(name: "\(fan.name) Eco", serialNumber: "HAIKU-ECO-\(suffix)"),
+        type: .switch,
+        services: [ecoService]
+    )
+
+    accessories.append(contentsOf: [fanAccessory, lightAccessory, tempAccessory, humidityAccessory, autoAccessory, whooshAccessory, ecoAccessory])
+    delegates.append(BridgeDelegate(api: api, fanService: fanService, lightService: lightService, tempService: tempService, humidityService: humidityService, autoService: autoService, whooshService: whooshService, ecoService: ecoService, debugTelemetry: debugTelemetry))
+}
 
 let storage = FileStorage(filename: "hap-configuration.json")
 let device = Device(
     bridgeInfo: Service.Info(name: config.bridgeName, serialNumber: "HAIKU-BRIDGE-001"),
     setupCode: .override(config.setupCode),
     storage: storage,
-    accessories: [fanAccessory, lightAccessory, tempAccessory, humidityAccessory, autoAccessory, whooshAccessory, ecoAccessory]
+    accessories: accessories
 )
 
-let delegate = BridgeDelegate(api: api, fanService: fanService, lightService: lightService, tempService: tempService, humidityService: humidityService, autoService: autoService, whooshService: whooshService, ecoService: ecoService, debugTelemetry: debugTelemetry)
-device.delegate = delegate
+let multiDelegate = MultiBridgeDelegate(delegates: delegates)
+device.delegate = multiDelegate
 let server = try Server(device: device)
 
 print("Bridge: \(config.bridgeName)")
 print("Setup code: \(config.setupCode)")
+print("Fans: \(config.fans.map(\.name).joined(separator: ", "))")
 print("Pairing QR:")
 print(device.setupQRCode.asText)
 if debugTelemetry {
@@ -583,7 +635,9 @@ if debugTelemetry {
 
 let timer = DispatchSource.makeTimerSource()
 timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(8))
-timer.setEventHandler { Task { await delegate.refreshFromFan() } }
+timer.setEventHandler {
+    Task { await multiDelegate.refreshAll() }
+}
 timer.resume()
 
 signal(SIGINT, SIG_IGN)

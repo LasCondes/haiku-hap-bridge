@@ -34,11 +34,13 @@ cp Config/bridge-config.example.json Config/bridge-config.json
 ```
 
 Edit `Config/bridge-config.json`:
-- `fanHost` — fan IP (example: `192.168.4.208`)
-- `fanPort` — usually `31415`
 - `bridgeName` — Home app bridge name
-- `fanName` / `lightName` / `temperatureName` / `humidityName` — accessory labels
 - `setupCode` — HomeKit setup code (must be valid format and not one of disallowed codes)
+- `fans` — array of fan entries
+  - `name` — base accessory label
+  - `fanHost` — fan IP (example: `192.168.4.208`)
+  - `fanPort` — usually `31415`
+  - optional: `lightName`, `temperatureName`, `humidityName`
 
 ## Run
 ```bash
@@ -50,7 +52,7 @@ Debug telemetry mode:
 .build/release/haiku-hap-bridge Config/bridge-config.json --debug-telemetry
 ```
 
-One-shot device info mode (prints make/model/software/firmware/temp/humidity and exits):
+One-shot device info mode (prints make/model/software/firmware/temp/humidity for each configured fan and exits):
 ```bash
 .build/release/haiku-hap-bridge Config/bridge-config.json --print-device-info
 ```
