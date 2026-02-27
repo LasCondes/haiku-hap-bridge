@@ -9,6 +9,7 @@ Custom Swift HomeKit bridge that exposes a non-HomeKit Haiku fan to Apple Home.
   - Light accessory (on/off + brightness)
   - Temperature sensor accessory (room temperature)
   - Humidity sensor accessory (relative humidity)
+  - Mode switches (Auto / Whoosh / Eco)
 - Translates HomeKit actions into Haiku's local TCP protocol (port 31415).
 
 ## Project layout
@@ -48,6 +49,13 @@ Debug telemetry mode:
 ```bash
 .build/release/haiku-hap-bridge Config/bridge-config.json --debug-telemetry
 ```
+
+Telemetry output includes:
+- fan state + speed
+- light level
+- auto/whoosh/eco mode state
+- temperature and humidity
+- make/model/software/firmware (best-effort from telemetry)
 
 When running, it prints:
 - bridge name

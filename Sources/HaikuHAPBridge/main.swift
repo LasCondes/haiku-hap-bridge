@@ -22,15 +22,25 @@ struct FanCommand: Codable {
     let power: String?
     let speedPercent: Int?
     let lightPercent: Int?
+    let autoMode: Bool?
+    let whoosh: Bool?
+    let eco: Bool?
 }
 
 struct FanStatus {
     var fanOn = false
+    var autoMode = false
+    var whoosh = false
+    var eco = false
     var speedPercent = 0
     var downlightOn = false
     var downlightPercent = 0
     var tempC: Double?
     var humidityPercent: Double?
+    var make: String?
+    var model: String?
+    var softwareVersion: String?
+    var firmwareVersion: String?
 }
 
 final class HaikuTCPAPI {
@@ -164,6 +174,41 @@ final class HaikuTCPAPI {
         return nil
     }
 
+    private func decodeString(_ bytes: [UInt8]) -> String? {
+        guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    private func parseDeviceInfo(_ bytes: [UInt8], status: inout FanStatus) {
+        var i = 0
+        while i < bytes.count {
+            guard let tag = parseVarint(bytes, &i) else { return }
+            let field = Int(tag >> 3)
+            let wire = Int(tag & 0x07)
+            if wire != 2 {
+                switch wire {
+                case 0: _ = parseVarint(bytes, &i)
+                case 1: i += 8
+                case 5: i += 4
+                default: return
+                }
+                continue
+            }
+
+            guard let lenV = parseVarint(bytes, &i) else { return }
+            let len = Int(lenV)
+            if len < 0 || i + len > bytes.count { return }
+            let sub = Array(bytes[i..<(i + len)])
+            i += len
+
+            if let text = decodeString(sub) {
+                if field == 2 { status.softwareVersion = text }
+                if field == 3 { status.firmwareVersion = text }
+            }
+        }
+    }
+
     private func parsePacket(_ packet: [UInt8], status: inout FanStatus) {
         var idx = 0
         var lightTarget = "downlight"
@@ -181,8 +226,13 @@ final class HaikuTCPAPI {
                     switch field {
                     case 43:
                         status.fanOn = v >= 1
+                        status.autoMode = v == 2
                     case 46:
                         status.speedPercent = max(0, min(100, v))
+                    case 58:
+                        status.whoosh = v == 1
+                    case 65:
+                        status.eco = v == 1
                     case 68:
                         if lightTarget == "downlight" { status.downlightOn = v >= 1 }
                     case 69:
@@ -203,6 +253,13 @@ final class HaikuTCPAPI {
                     let len = Int(lenV)
                     if len < 0 || i + len > bytes.count { return }
                     let sub = Array(bytes[i..<(i + len)])
+
+                    if field == 16 {
+                        parseDeviceInfo(sub, status: &status)
+                    } else if (field == 56 || field == 59 || field == 76), let text = decodeString(sub) {
+                        if status.model == nil { status.model = text }
+                    }
+
                     var subIdx = 0
                     walk(sub, &subIdx)
                     i += len
@@ -244,12 +301,21 @@ final class HaikuTCPAPI {
             parsePacket(p, status: &status)
         }
 
+        if status.make == nil { status.make = "Big Ass Fans / Delta T" }
+
         return [
             "on": status.fanOn,
+            "auto": status.autoMode,
+            "whoosh": status.whoosh,
+            "eco": status.eco,
             "speedPercent": status.speedPercent,
             "lightPercent": status.downlightOn ? status.downlightPercent : 0,
             "tempC": status.tempC as Any,
             "humidity": status.humidityPercent as Any,
+            "make": status.make as Any,
+            "model": status.model as Any,
+            "softwareVersion": status.softwareVersion as Any,
+            "firmwareVersion": status.firmwareVersion as Any,
         ]
     }
 
@@ -261,6 +327,11 @@ final class HaikuTCPAPI {
                     try writeAll(fd: fd, bytes: frame(prefix + [216, 2, UInt8(state)]))
                 }
 
+                if let auto = cmd.autoMode {
+                    let mode: UInt8 = auto ? 2 : 1
+                    try writeAll(fd: fd, bytes: frame(prefix + [216, 2, mode]))
+                }
+
                 if let speed = cmd.speedPercent {
                     let s = max(0, min(100, speed))
                     let fanSpeed = UInt8((Double(s) / 100.0 * 7.0).rounded())
@@ -268,6 +339,14 @@ final class HaikuTCPAPI {
                     if fanSpeed > 0 {
                         try writeAll(fd: fd, bytes: frame(prefix + [216, 2, 1]))
                     }
+                }
+
+                if let whoosh = cmd.whoosh {
+                    try writeAll(fd: fd, bytes: frame(prefix + [208, 3, whoosh ? 1 : 0]))
+                }
+
+                if let eco = cmd.eco {
+                    try writeAll(fd: fd, bytes: frame(prefix + [136, 4, eco ? 1 : 0]))
                 }
 
                 if let light = cmd.lightPercent {
@@ -296,14 +375,20 @@ final class BridgeDelegate: DeviceDelegate {
     private let lightService: Service.Lightbulb
     private let tempService: Service.TemperatureSensor
     private let humidityService: Service.HumiditySensor
+    private let autoService: Service.Switch
+    private let whooshService: Service.Switch
+    private let ecoService: Service.Switch
     private let debugTelemetry: Bool
 
-    init(api: HaikuTCPAPI, fanService: Service.FanV2, lightService: Service.Lightbulb, tempService: Service.TemperatureSensor, humidityService: Service.HumiditySensor, debugTelemetry: Bool) {
+    init(api: HaikuTCPAPI, fanService: Service.FanV2, lightService: Service.Lightbulb, tempService: Service.TemperatureSensor, humidityService: Service.HumiditySensor, autoService: Service.Switch, whooshService: Service.Switch, ecoService: Service.Switch, debugTelemetry: Bool) {
         self.api = api
         self.fanService = fanService
         self.lightService = lightService
         self.tempService = tempService
         self.humidityService = humidityService
+        self.autoService = autoService
+        self.whooshService = whooshService
+        self.ecoService = ecoService
         self.debugTelemetry = debugTelemetry
     }
 
@@ -311,10 +396,10 @@ final class BridgeDelegate: DeviceDelegate {
         if service.type == .fanV2 {
             if characteristic.type == .active {
                 let isOn = (newValue as? Enums.Active) == .active
-                Task { await api.command(FanCommand(power: isOn ? "on" : "off", speedPercent: nil, lightPercent: nil)) }
+                Task { await api.command(FanCommand(power: isOn ? "on" : "off", speedPercent: nil, lightPercent: nil, autoMode: nil, whoosh: nil, eco: nil)) }
             } else if characteristic.type == .rotationSpeed {
                 if let speed = newValue as? Float {
-                    Task { await api.command(FanCommand(power: nil, speedPercent: max(0, min(100, Int(speed))), lightPercent: nil)) }
+                    Task { await api.command(FanCommand(power: nil, speedPercent: max(0, min(100, Int(speed))), lightPercent: nil, autoMode: nil, whoosh: nil, eco: nil)) }
                 }
             }
         }
@@ -322,12 +407,22 @@ final class BridgeDelegate: DeviceDelegate {
         if service.type == .lightbulb {
             if characteristic.type == .powerState {
                 if let on = newValue as? Bool {
-                    Task { await api.command(FanCommand(power: nil, speedPercent: nil, lightPercent: on ? 100 : 0)) }
+                    Task { await api.command(FanCommand(power: nil, speedPercent: nil, lightPercent: on ? 100 : 0, autoMode: nil, whoosh: nil, eco: nil)) }
                 }
             } else if characteristic.type == .brightness {
                 if let b = newValue as? Int {
-                    Task { await api.command(FanCommand(power: nil, speedPercent: nil, lightPercent: max(0, min(100, b)))) }
+                    Task { await api.command(FanCommand(power: nil, speedPercent: nil, lightPercent: max(0, min(100, b)), autoMode: nil, whoosh: nil, eco: nil)) }
                 }
+            }
+        }
+
+        if service.type == .switch, characteristic.type == .powerState, let on = newValue as? Bool {
+            if service === autoService {
+                Task { await api.command(FanCommand(power: nil, speedPercent: nil, lightPercent: nil, autoMode: on, whoosh: nil, eco: nil)) }
+            } else if service === whooshService {
+                Task { await api.command(FanCommand(power: nil, speedPercent: nil, lightPercent: nil, autoMode: nil, whoosh: on, eco: nil)) }
+            } else if service === ecoService {
+                Task { await api.command(FanCommand(power: nil, speedPercent: nil, lightPercent: nil, autoMode: nil, whoosh: nil, eco: on)) }
             }
         }
     }
@@ -346,6 +441,9 @@ final class BridgeDelegate: DeviceDelegate {
             let isOn = (s["on"] as? Bool) == true
             fanService.active.value = isOn ? .active : .inactive
             lightService.powerState.value = ((s["lightPercent"] as? Int) ?? 0) > 0
+            autoService.powerState.value = (s["auto"] as? Bool) == true
+            whooshService.powerState.value = (s["whoosh"] as? Bool) == true
+            ecoService.powerState.value = (s["eco"] as? Bool) == true
 
             if let speed = s["speedPercent"] as? Int, let rotation = fanService.rotationSpeed {
                 rotation.value = Float(max(0, min(100, speed)))
@@ -363,11 +461,18 @@ final class BridgeDelegate: DeviceDelegate {
             if debugTelemetry {
                 let speed = (s["speedPercent"] as? Int) ?? 0
                 let light = (s["lightPercent"] as? Int) ?? 0
+                let auto = (s["auto"] as? Bool) == true
+                let whoosh = (s["whoosh"] as? Bool) == true
+                let eco = (s["eco"] as? Bool) == true
                 let temp = asDouble(s["tempC"])
                 let humidity = asDouble(s["humidity"])
                 let tempText = temp.map { String(format: "%.2f°C", $0) } ?? "n/a"
                 let humidityText = humidity.map { String(format: "%.1f%%", $0) } ?? "n/a"
-                print("[telemetry] fanOn=\(isOn) speed=\(speed)% light=\(light)% temp=\(tempText) humidity=\(humidityText)")
+                let make = (s["make"] as? String) ?? "n/a"
+                let model = (s["model"] as? String) ?? "n/a"
+                let sw = (s["softwareVersion"] as? String) ?? "n/a"
+                let fw = (s["firmwareVersion"] as? String) ?? "n/a"
+                print("[telemetry] fanOn=\(isOn) auto=\(auto) whoosh=\(whoosh) eco=\(eco) speed=\(speed)% light=\(light)% temp=\(tempText) humidity=\(humidityText) make=\(make) model=\(model) sw=\(sw) fw=\(fw)")
             }
         } catch {
             fputs("Status refresh error: \(error)\n", stderr)
@@ -414,15 +519,36 @@ let humidityAccessory = Accessory(
     services: [humidityService]
 )
 
+let autoService = Service.Switch(characteristics: [.name("\(config.fanName) Auto")])
+let autoAccessory = Accessory(
+    info: Service.Info(name: "\(config.fanName) Auto", serialNumber: "HAIKU-AUTO-001"),
+    type: .switch,
+    services: [autoService]
+)
+
+let whooshService = Service.Switch(characteristics: [.name("\(config.fanName) Whoosh")])
+let whooshAccessory = Accessory(
+    info: Service.Info(name: "\(config.fanName) Whoosh", serialNumber: "HAIKU-WHOOSH-001"),
+    type: .switch,
+    services: [whooshService]
+)
+
+let ecoService = Service.Switch(characteristics: [.name("\(config.fanName) Eco")])
+let ecoAccessory = Accessory(
+    info: Service.Info(name: "\(config.fanName) Eco", serialNumber: "HAIKU-ECO-001"),
+    type: .switch,
+    services: [ecoService]
+)
+
 let storage = FileStorage(filename: "hap-configuration.json")
 let device = Device(
     bridgeInfo: Service.Info(name: config.bridgeName, serialNumber: "HAIKU-BRIDGE-001"),
     setupCode: .override(config.setupCode),
     storage: storage,
-    accessories: [fanAccessory, lightAccessory, tempAccessory, humidityAccessory]
+    accessories: [fanAccessory, lightAccessory, tempAccessory, humidityAccessory, autoAccessory, whooshAccessory, ecoAccessory]
 )
 
-let delegate = BridgeDelegate(api: api, fanService: fanService, lightService: lightService, tempService: tempService, humidityService: humidityService, debugTelemetry: debugTelemetry)
+let delegate = BridgeDelegate(api: api, fanService: fanService, lightService: lightService, tempService: tempService, humidityService: humidityService, autoService: autoService, whooshService: whooshService, ecoService: ecoService, debugTelemetry: debugTelemetry)
 device.delegate = delegate
 let server = try Server(device: device)
 
