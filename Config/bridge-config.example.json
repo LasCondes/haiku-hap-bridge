@@ -1,0 +1,10 @@
+{
+  "fanHost": "192.168.4.208",
+  "fanPort": 31415,
+  "bridgeName": "Haiku Swift Bridge",
+  "fanName": "Office Fan",
+  "lightName": "Office Fan Light",
+  "temperatureName": "Office Temperature",
+  "humidityName": "Office Humidity",
+  "setupCode": "518-08-275"
+}
