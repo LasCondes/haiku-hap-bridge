@@ -586,13 +586,19 @@ timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(8))
 timer.setEventHandler { Task { await delegate.refreshFromFan() } }
 timer.resume()
 
-final class RunState { static var running = true }
-func handleSignal(_ signal: Int32) -> Void { RunState.running = false }
-_ = Darwin.signal(SIGINT, handleSignal)
-_ = Darwin.signal(SIGTERM, handleSignal)
+signal(SIGINT, SIG_IGN)
+signal(SIGTERM, SIG_IGN)
 
-while RunState.running {
-    RunLoop.current.run(mode: .default, before: Date.distantFuture)
-}
+let stopSemaphore = DispatchSemaphore(value: 0)
+let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+
+sigintSource.setEventHandler { stopSemaphore.signal() }
+sigtermSource.setEventHandler { stopSemaphore.signal() }
+
+sigintSource.resume()
+sigtermSource.resume()
+
+_ = stopSemaphore.wait(timeout: .distantFuture)
 
 try server.stop()
