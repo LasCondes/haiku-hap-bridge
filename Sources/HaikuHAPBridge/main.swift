@@ -117,7 +117,7 @@ final class HaikuTCPAPI {
         if fd < 0 { throw NSError(domain: "socket", code: 1) }
         defer { close(fd) }
 
-        var timeout = timeval(tv_sec: 0, tv_usec: 200_000)
+        var timeout = timeval(tv_sec: 0, tv_usec: 500_000)
         withUnsafePointer(to: &timeout) {
             _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
         }
@@ -157,11 +157,8 @@ final class HaikuTCPAPI {
     }
 
     private func requestFrames() -> [[UInt8]] {
-        [
-            prefix + [18, 4, 26, 2, 8, 3],
-            prefix + [18, 4, 26, 2, 8, 6],
-            prefix + [18, 2, 26, 0],
-        ]
+        // Query all properties: Root { root2(F2) { query(F3) {} } }
+        [[0x12, 0x02, 0x1a, 0x00]]
     }
 
     private func parseVarint(_ data: [UInt8], _ index: inout Int) -> UInt64? {
@@ -216,7 +213,6 @@ final class HaikuTCPAPI {
 
     private func parsePacket(_ packet: [UInt8], status: inout FanStatus) {
         var idx = 0
-        var lightTarget = "downlight"
 
         func walk(_ bytes: [UInt8], _ i: inout Int) {
             while i < bytes.count {
@@ -227,27 +223,32 @@ final class HaikuTCPAPI {
                 switch wire {
                 case 0:
                     guard let raw = parseVarint(bytes, &i) else { return }
-                    let v = Int(raw)
+                    let v = Int(truncatingIfNeeded: raw)
                     switch field {
                     case 43:
                         status.fanOn = v >= 1
                         status.autoMode = v == 2
-                    case 46:
+                    case 45:
                         status.speedPercent = max(0, min(100, v))
+                    case 46:
+                        if status.speedPercent == 0 {
+                            // Fallback: convert speed level (0-7) to percentage
+                            status.speedPercent = max(0, min(100, v * 100 / 7))
+                        }
                     case 58:
                         status.whoosh = v == 1
                     case 65:
                         status.eco = v == 1
                     case 68:
-                        if lightTarget == "downlight" { status.downlightOn = v >= 1 }
+                        status.downlightOn = v >= 1
                     case 69:
-                        if lightTarget == "downlight" { status.downlightPercent = max(0, min(100, v)) }
-                    case 82:
-                        lightTarget = (v == 2) ? "uplight" : "downlight"
+                        status.downlightPercent = max(0, min(100, v))
                     case 86:
                         status.tempC = Double(v) / 100.0
                     case 87:
-                        status.humidityPercent = Double(v) / 100.0
+                        if v >= 0 && v <= 100 {
+                            status.humidityPercent = Double(v)
+                        }
                     default:
                         break
                     }
@@ -261,12 +262,13 @@ final class HaikuTCPAPI {
 
                     if field == 16 {
                         parseDeviceInfo(sub, status: &status)
-                    } else if (field == 56 || field == 59 || field == 76), let text = decodeString(sub) {
-                        if status.model == nil { status.model = text }
+                    } else {
+                        if field == 2, let text = decodeString(sub) {
+                            if status.model == nil { status.model = text }
+                        }
+                        var subIdx = 0
+                        walk(sub, &subIdx)
                     }
-
-                    var subIdx = 0
-                    walk(sub, &subIdx)
                     i += len
                 case 5:
                     i += 4
@@ -286,7 +288,7 @@ final class HaikuTCPAPI {
             }
 
             var all: [UInt8] = []
-            let deadline = Date().addingTimeInterval(1.2)
+            let deadline = Date().addingTimeInterval(2.0)
             var buf = [UInt8](repeating: 0, count: 4096)
 
             while Date() < deadline {
@@ -357,15 +359,10 @@ final class HaikuTCPAPI {
                 if let light = cmd.lightPercent {
                     let l = UInt8(max(0, min(100, light)))
                     let isOn: UInt8 = l > 0 ? 1 : 0
-                    try writeAll(fd: fd, bytes: frame(prefix + [144, 5, 1]))   // downlight target
                     try writeAll(fd: fd, bytes: frame(prefix + [160, 4, isOn]))
                     if isOn == 1 {
                         try writeAll(fd: fd, bytes: frame(prefix + [168, 4, l]))
                     }
-                }
-
-                for query in requestFrames() {
-                    try writeAll(fd: fd, bytes: frame(query))
                 }
             }
         } catch {
@@ -585,6 +582,8 @@ func loadConfig(path: String) throws -> BridgeConfig {
 }
 
 let args = Array(CommandLine.arguments.dropFirst())
+setbuf(stdout, nil)
+
 let debugTelemetry = args.contains("--debug-telemetry")
 let printDeviceInfo = args.contains("--print-device-info")
 let discoverMode = args.contains("--discover")
@@ -638,63 +637,113 @@ for (idx, fan) in config.fans.enumerated() {
     let suffix = String(format: "%03d", idx + 1)
     let api = HaikuTCPAPI(config: fan)
 
+    // Query the fan at startup to get real device info
+    var fanModel = "Haiku H/I Series"
+    var fanFirmware = "0.0.0"
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        if let s = try? await api.status() {
+            if let m = s["model"] as? String { fanModel = m }
+            if let sw = s["softwareVersion"] as? String { fanFirmware = sw }
+        }
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + .seconds(5))
+    print("[\(fan.name)] model=\(fanModel) firmware=\(fanFirmware)")
+
     let fanService = Service.FanV2(characteristics: [.name(fan.name), .rotationSpeed()])
+    fanService.active.value = .inactive
+    if let rotation = fanService.rotationSpeed { rotation.value = 0 }
     let fanAccessory = Accessory(
-        info: Service.Info(name: fan.name, serialNumber: "HAIKU-FAN-\(suffix)"),
+        info: Service.Info(name: fan.name, serialNumber: "HAIKU-FAN-\(suffix)", manufacturer: "Big Ass Fans", model: fanModel, firmwareRevision: fanFirmware),
         type: .fan,
         services: [fanService]
     )
 
     let lightName = fan.lightName ?? "\(fan.name) Light"
     let lightService = Service.Lightbulb(characteristics: [.name(lightName), .brightness()])
+    lightService.powerState.value = false
+    if let brightness = lightService.brightness { brightness.value = 0 }
     let lightAccessory = Accessory(
-        info: Service.Info(name: lightName, serialNumber: "HAIKU-LIGHT-\(suffix)"),
+        info: Service.Info(name: lightName, serialNumber: "HAIKU-LIGHT-\(suffix)", manufacturer: "Big Ass Fans", model: fanModel, firmwareRevision: fanFirmware),
         type: .lightbulb,
         services: [lightService]
     )
 
     let tempName = fan.temperatureName ?? "\(fan.name) Temperature"
     let tempService = Service.TemperatureSensor(characteristics: [.name(tempName)])
+    tempService.currentTemperature.value = 20.0
     let tempAccessory = Accessory(
-        info: Service.Info(name: tempName, serialNumber: "HAIKU-TEMP-\(suffix)"),
+        info: Service.Info(name: tempName, serialNumber: "HAIKU-TEMP-\(suffix)", manufacturer: "Big Ass Fans", model: fanModel, firmwareRevision: fanFirmware),
         type: .sensor,
         services: [tempService]
     )
 
-    let humidityName = fan.humidityName ?? "\(fan.name) Humidity"
-    let humidityService = Service.HumiditySensor(characteristics: [.name(humidityName)])
-    let humidityAccessory = Accessory(
-        info: Service.Info(name: humidityName, serialNumber: "HAIKU-HUM-\(suffix)"),
-        type: .sensor,
-        services: [humidityService]
-    )
-
     let autoService = Service.Switch(characteristics: [.name("\(fan.name) Auto")])
+    autoService.powerState.value = false
     let autoAccessory = Accessory(
-        info: Service.Info(name: "\(fan.name) Auto", serialNumber: "HAIKU-AUTO-\(suffix)"),
+        info: Service.Info(name: "\(fan.name) Auto", serialNumber: "HAIKU-AUTO-\(suffix)", manufacturer: "Big Ass Fans", model: fanModel, firmwareRevision: fanFirmware),
         type: .switch,
         services: [autoService]
     )
 
     let whooshService = Service.Switch(characteristics: [.name("\(fan.name) Whoosh")])
+    whooshService.powerState.value = false
     let whooshAccessory = Accessory(
-        info: Service.Info(name: "\(fan.name) Whoosh", serialNumber: "HAIKU-WHOOSH-\(suffix)"),
+        info: Service.Info(name: "\(fan.name) Whoosh", serialNumber: "HAIKU-WHOOSH-\(suffix)", manufacturer: "Big Ass Fans", model: fanModel, firmwareRevision: fanFirmware),
         type: .switch,
         services: [whooshService]
     )
 
     let ecoService = Service.Switch(characteristics: [.name("\(fan.name) Eco")])
+    ecoService.powerState.value = false
     let ecoAccessory = Accessory(
-        info: Service.Info(name: "\(fan.name) Eco", serialNumber: "HAIKU-ECO-\(suffix)"),
+        info: Service.Info(name: "\(fan.name) Eco", serialNumber: "HAIKU-ECO-\(suffix)", manufacturer: "Big Ass Fans", model: fanModel, firmwareRevision: fanFirmware),
         type: .switch,
         services: [ecoService]
     )
 
-    accessories.append(contentsOf: [fanAccessory, lightAccessory, tempAccessory, humidityAccessory, autoAccessory, whooshAccessory, ecoAccessory])
-    delegates.append(BridgeDelegate(api: api, fanService: fanService, lightService: lightService, tempService: tempService, humidityService: humidityService, autoService: autoService, whooshService: whooshService, ecoService: ecoService, debugTelemetry: debugTelemetry))
+    accessories.append(contentsOf: [fanAccessory, lightAccessory, tempAccessory, autoAccessory, whooshAccessory, ecoAccessory])
+    delegates.append(BridgeDelegate(api: api, fanService: fanService, lightService: lightService, tempService: tempService, humidityService: Service.HumiditySensor(), autoService: autoService, whooshService: whooshService, ecoService: ecoService, debugTelemetry: debugTelemetry))
 }
 
-let storage = FileStorage(filename: "hap-configuration.json")
+let hapConfigFile = "hap-configuration.json"
+
+// Seed deterministic bridge identifier from hardware UUID if no config exists
+if !FileManager.default.fileExists(atPath: hapConfigFile) {
+    let ioregOutput = runCommand("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"])
+    if let start = ioregOutput.range(of: "IOPlatformUUID\" = \""),
+       let end = ioregOutput[start.upperBound...].range(of: "\"") {
+        let hwUUID = String(ioregOutput[start.upperBound..<end.lowerBound])
+
+        // Hash hardware UUID to 6 bytes for a stable bridge identifier
+        let utf8 = Array(hwUUID.utf8)
+        var hash = [UInt8](repeating: 0, count: 6)
+        for (i, b) in utf8.enumerated() {
+            hash[i % 6] = hash[i % 6] &+ b
+        }
+        hash[0] |= 0x02  // locally administered bit
+        hash[0] &= 0xFE  // unicast bit
+        let identifier = hash.map { String(format: "%02X", $0) }.joined(separator: ":")
+
+        // Generate random Curve25519 private key (32 bytes)
+        var keyBytes = [UInt8](repeating: 0, count: 32)
+        for i in 0..<32 { keyBytes[i] = UInt8.random(in: 0...255) }
+        let keyBase64 = Data(keyBytes).base64EncodedString()
+
+        // Write seed config so the HAP library uses our deterministic identifier
+        let seed = """
+        {"identifier":"\(identifier)","stableHash":0,"number":1,\
+        "privateKey":"\(keyBase64)","pairings":[],\
+        "setupCode":"\(config.setupCode)","setupKey":"HKFB",\
+        "aidGenerator":{"lastAID":0},"aidForAccessorySerialNumber":{}}
+        """
+        try? seed.data(using: .utf8)?.write(to: URL(fileURLWithPath: hapConfigFile))
+        print("Generated bridge identifier: \(identifier) (from hardware UUID)")
+    }
+}
+
+let storage = FileStorage(filename: hapConfigFile)
 let device = Device(
     bridgeInfo: Service.Info(name: config.bridgeName, serialNumber: "HAIKU-BRIDGE-001"),
     setupCode: .override(config.setupCode),
@@ -705,6 +754,13 @@ let device = Device(
 let multiDelegate = MultiBridgeDelegate(delegates: delegates)
 device.delegate = multiDelegate
 let server = try Server(device: device)
+
+// Dump accessory database for debugging
+if let jsonData = try? JSONSerialization.data(withJSONObject: ["accessories": device.accessories.map { $0.serialized() }], options: [.prettyPrinted, .sortedKeys]),
+   let jsonStr = String(data: jsonData, encoding: .utf8) {
+    try? jsonStr.write(toFile: "/tmp/hap-accessories.json", atomically: true, encoding: .utf8)
+    print("Wrote accessory database to /tmp/hap-accessories.json (\(jsonData.count) bytes)")
+}
 
 print("Bridge: \(config.bridgeName)")
 print("Setup code: \(config.setupCode)")
@@ -725,16 +781,19 @@ timer.resume()
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
 
-let stopSemaphore = DispatchSemaphore(value: 0)
 let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
 let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 
-sigintSource.setEventHandler { stopSemaphore.signal() }
-sigtermSource.setEventHandler { stopSemaphore.signal() }
+sigintSource.setEventHandler {
+    try? server.stop()
+    exit(0)
+}
+sigtermSource.setEventHandler {
+    try? server.stop()
+    exit(0)
+}
 
 sigintSource.resume()
 sigtermSource.resume()
 
-_ = stopSemaphore.wait(timeout: .distantFuture)
-
-try server.stop()
+dispatchMain()
