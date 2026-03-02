@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-03-02 — Discovery parser compatibility update
+
+### Fixed
+- `--discover` now parses modern macOS `dns-sd -B` output where the instance name appears in the final column after `_http._tcp.`.
+- `--discover` now parses resolved host/port from `dns-sd -L` safely when hostnames contain colon-delimited MAC fragments (for example `LivingRoom-23:B6:0C.local.:31416`).
+- `--discover` now parses IPv4 addresses from current `dns-sd -G` output format without relying on tab-delimited fields.
+
+### Changed
+- Discovery filtering now uses Haiku TXT signatures (`mac=`, `path=/FW...`) instead of only checking for "fan" in the instance name.
+
 ## 2025-02-28 — Protocol rewrite and HomeKit fix
 
 ### Fixed

@@ -531,46 +531,99 @@ func runCommand(_ executable: String, _ arguments: [String], timeout: TimeInterv
     return String(data: data, encoding: .utf8) ?? ""
 }
 
-func discoverFans() -> [FanConfig] {
-    let browse = runCommand("/usr/bin/dns-sd", ["-B", "_http._tcp", "local."], timeout: 6)
-    let lines = browse.split(separator: "\n").map(String.init)
+func parseBrowseInstanceName(from line: String) -> String? {
+    guard line.contains("_http._tcp.") else { return nil }
 
-    var names: [String] = []
-    for line in lines where line.contains("_http._tcp") {
-        if let range = line.range(of: "_http._tcp.") {
-            let raw = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
-            if !raw.isEmpty, raw.lowercased().contains("fan") {
-                names.append(raw)
-            }
+    // Modern dns-sd output has instance name in the final column after service type.
+    if let serviceRange = line.range(of: "_http._tcp.") {
+        let trailing = line[serviceRange.upperBound...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trailing.isEmpty, trailing != "local." {
+            return trailing
         }
     }
 
-    let uniqueNames = Array(Set(names)).sorted()
+    // Legacy output embeds instance directly before "._http._tcp.".
+    if let embeddedRange = line.range(of: "._http._tcp.") {
+        let prefix = line[..<embeddedRange.lowerBound]
+        if let token = prefix.split(whereSeparator: \.isWhitespace).last {
+            return String(token).replacingOccurrences(of: "\\032", with: " ")
+        }
+    }
+
+    return nil
+}
+
+func regexCaptureGroups(in text: String, pattern: String, options: NSRegularExpression.Options = []) -> [String]? {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return nil }
+    let fullRange = NSRange(text.startIndex..<text.endIndex, in: text)
+    guard let match = regex.firstMatch(in: text, range: fullRange), match.numberOfRanges > 1 else { return nil }
+
+    var groups: [String] = []
+    for idx in 1..<match.numberOfRanges {
+        let range = match.range(at: idx)
+        guard let swiftRange = Range(range, in: text) else { return nil }
+        groups.append(String(text[swiftRange]))
+    }
+
+    return groups
+}
+
+func parseResolvedHostAndPort(from lookup: String) -> (host: String, port: Int)? {
+    let lines = lookup.split(separator: "\n").map(String.init)
+
+    for line in lines where line.localizedCaseInsensitiveContains("can be reached at ") {
+        guard
+            let captures = regexCaptureGroups(
+                in: line,
+                pattern: #"can be reached at\s+(.+):([0-9]+)(?=\s|$)"#,
+                options: [.caseInsensitive]
+            ),
+            captures.count == 2,
+            let port = Int(captures[1])
+        else { continue }
+
+        var host = captures[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        while host.hasSuffix(".") { host.removeLast() }
+        if !host.isEmpty {
+            return (host, port)
+        }
+    }
+
+    return nil
+}
+
+func parseIPv4Address(from lookup: String) -> String? {
+    lookup.range(of: #"\b(?:\d{1,3}\.){3}\d{1,3}\b"#, options: .regularExpression).map { String(lookup[$0]) }
+}
+
+func discoverFans() -> [FanConfig] {
+    let browse = runCommand("/usr/bin/dns-sd", ["-B", "_http._tcp", "local."], timeout: 6)
+    let uniqueNames = Array(
+        Set(
+            browse
+                .split(separator: "\n")
+                .map(String.init)
+                .compactMap(parseBrowseInstanceName(from:))
+                .map { $0.replacingOccurrences(of: "\\032", with: " ").trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+    ).sorted()
+
     var fans: [FanConfig] = []
 
     for name in uniqueNames {
         let lookup = runCommand("/usr/bin/dns-sd", ["-L", name, "_http._tcp", "local."], timeout: 4)
-        guard let hostMatch = lookup.range(of: "can be reached at ", options: .caseInsensitive) else { continue }
-        let suffix = lookup[hostMatch.upperBound...]
-        guard let dotRange = suffix.range(of: ".:") else { continue }
-        let host = String(suffix[..<dotRange.lowerBound])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerLookup = lookup.lowercased()
+        let likelyFan = lowerLookup.contains(" mac=") || lowerLookup.contains("\nmac=") || lowerLookup.contains("path=/fw")
+        guard likelyFan, let resolved = parseResolvedHostAndPort(from: lookup) else { continue }
 
-        guard let portRange = suffix.range(of: ".:(\\d+)", options: .regularExpression),
-              let port = Int(String(suffix[portRange]).replacingOccurrences(of: ".:", with: "")) else { continue }
-
-        let ipLookup = runCommand("/usr/bin/dns-sd", ["-G", "v4", host + ".local"], timeout: 3)
-        let ip = ipLookup
-            .split(separator: "\n")
-            .map(String.init)
-            .first(where: { $0.contains(" Add ") && $0.contains("\t") })?
-            .split(separator: "\t")
-            .last
-            .map(String.init)
-            ?? host
+        let addressLookupHost = resolved.host.contains(".") ? resolved.host : "\(resolved.host).local"
+        let ipLookup = runCommand("/usr/bin/dns-sd", ["-G", "v4", addressLookupHost], timeout: 3)
+        let ip = parseIPv4Address(from: ipLookup) ?? resolved.host
 
         let baseName = name.replacingOccurrences(of: "\\s+\\d{2}:\\d{2}:\\d{2}$", with: "", options: .regularExpression)
-        fans.append(FanConfig(name: baseName, fanHost: ip, fanPort: port, lightName: nil, temperatureName: nil, humidityName: nil))
+        fans.append(FanConfig(name: baseName, fanHost: ip, fanPort: resolved.port, lightName: nil, temperatureName: nil, humidityName: nil))
     }
 
     return fans

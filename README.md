@@ -4,7 +4,7 @@ Custom Swift HomeKit bridge for Big Ass Fans (BAF) Haiku H/I Series ceiling fans
 
 ## What it does
 - Runs a local HAP bridge on macOS, appearing as a native HomeKit bridge.
-- Communicates with Haiku fans using their local protobuf-over-TCP protocol (port 31415, SLIP framing).
+- Communicates with Haiku fans using their local protobuf-over-TCP protocol (SLIP framing, per-fan TCP port from config/discovery).
 - Exposes per-fan accessories:
   - **Fan** (on/off + speed 0-7 mapped to 0-100%)
   - **Light** (on/off + brightness 0-100%)
@@ -40,12 +40,21 @@ Edit `Config/bridge-config.json`:
 - `fans` — array of fan entries
   - `name` — base accessory label
   - `fanHost` — fan IP (example: `192.168.4.208`)
-  - `fanPort` — usually `31415`
+  - `fanPort` — discovered per device (often `31416` for `_http._tcp` service)
   - optional: `lightName`, `temperatureName`
 
 Or use auto-discovery to generate a config:
 ```bash
 .build/release/haiku-hap-bridge --discover
+```
+
+Discovery notes:
+- Uses Bonjour (`dns-sd`) to browse `_http._tcp` services and resolve host/IP/port.
+- Supports both legacy and current `dns-sd` output formats on macOS.
+- Filters to likely Haiku devices using TXT keys (`mac=` and `path=/FW...`) so unrelated `_http._tcp` services are ignored.
+- Write output directly to config:
+```bash
+.build/release/haiku-hap-bridge --discover > Config/bridge-config.json
 ```
 
 ## Run

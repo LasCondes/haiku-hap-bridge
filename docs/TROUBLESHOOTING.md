@@ -23,6 +23,15 @@ Other causes:
 - Confirm `setupCode` is valid and not a blocked default code.
 - Delete `hap-configuration.json` and re-pair if needed.
 
+## `--discover` returns an empty `fans` array
+- Verify Bonjour browsing works from your shell:
+  `dns-sd -B _http._tcp local.`
+- Resolve one discovered service:
+  `dns-sd -L "<Instance Name>" _http._tcp local.`
+- For Haiku devices, the TXT line should include keys like `mac=` and `path=/FW...`.
+- If those TXT keys are missing, the bridge skips that service as non-Haiku.
+- If `dns-sd` fails with "Service Not Running", run from a normal local macOS login session (not restricted sandbox/daemon context).
+
 ## Fan unreachable / status refresh errors
 - Verify `fanHost` and `fanPort` in config.
 - Confirm fan is on same LAN and reachable from Mac.
