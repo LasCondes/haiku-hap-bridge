@@ -72,6 +72,12 @@ One-shot device info mode (prints make/model/software/firmware/temperature for e
 .build/release/haiku-hap-bridge Config/bridge-config.json --print-device-info
 ```
 
+Set fan device name mode (writes the name to the fan itself, not just HomeKit display labels):
+```bash
+.build/release/haiku-hap-bridge Config/bridge-config.json --set-fan-name 192.168.4.212 "Primary Bedroom"
+```
+You can pass either the configured `fanHost` IP or current configured fan `name` as the target. The command sends the rename over the i6 API port (`31415`) and also attempts configured/fallback ports for compatibility.
+
 When running, the bridge prints its name, setup code, and a pairing QR code. Add the bridge in Apple Home by scanning the QR or entering the setup code manually.
 
 ## Pairing lifecycle

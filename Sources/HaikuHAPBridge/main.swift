@@ -50,7 +50,6 @@ struct FanStatus {
 
 final class HaikuTCPAPI {
     private let config: FanConfig
-    private let prefix: [UInt8] = [18, 7, 18, 5, 26, 3]
 
     init(config: FanConfig) {
         self.config = config
@@ -159,6 +158,41 @@ final class HaikuTCPAPI {
     private func requestFrames() -> [[UInt8]] {
         // Query all properties: Root { root2(F2) { query(F3) {} } }
         [[0x12, 0x02, 0x1a, 0x00]]
+    }
+
+    private func encodeVarint(_ value: UInt64) -> [UInt8] {
+        var v = value
+        var out: [UInt8] = []
+        while true {
+            var byte = UInt8(v & 0x7F)
+            v >>= 7
+            if v != 0 {
+                byte |= 0x80
+            }
+            out.append(byte)
+            if v == 0 {
+                break
+            }
+        }
+        return out
+    }
+
+    private func commitFrame(propertyBytes: [UInt8]) -> [UInt8] {
+        // Root { root2(F2) { commit(F2) { properties(F3) { ... } } } }
+        let properties = [UInt8]([0x1A]) + encodeVarint(UInt64(propertyBytes.count)) + propertyBytes
+        let commit = [UInt8]([0x12]) + encodeVarint(UInt64(properties.count)) + properties
+        return [UInt8]([0x12]) + encodeVarint(UInt64(commit.count)) + commit
+    }
+
+    private func propertyVarintField(_ field: Int, _ value: Int) -> [UInt8] {
+        let key = UInt64((field << 3) | 0)
+        return encodeVarint(key) + encodeVarint(UInt64(max(0, value)))
+    }
+
+    private func propertyStringField(_ field: Int, _ value: String) -> [UInt8] {
+        let key = UInt64((field << 3) | 2)
+        let bytes = Array(value.utf8)
+        return encodeVarint(key) + encodeVarint(UInt64(bytes.count)) + bytes
     }
 
     private func parseVarint(_ data: [UInt8], _ index: inout Int) -> UInt64? {
@@ -331,42 +365,54 @@ final class HaikuTCPAPI {
             try withSocket { fd in
                 if let power = cmd.power {
                     let state = power.lowercased() == "on" ? 1 : 0
-                    try writeAll(fd: fd, bytes: frame(prefix + [216, 2, UInt8(state)]))
+                    try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(43, state))))
                 }
 
                 if let auto = cmd.autoMode {
                     let mode: UInt8 = auto ? 2 : 1
-                    try writeAll(fd: fd, bytes: frame(prefix + [216, 2, mode]))
+                    try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(43, Int(mode)))))
                 }
 
                 if let speed = cmd.speedPercent {
                     let s = max(0, min(100, speed))
                     let fanSpeed = UInt8((Double(s) / 100.0 * 7.0).rounded())
-                    try writeAll(fd: fd, bytes: frame(prefix + [240, 2, fanSpeed]))
+                    try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(46, Int(fanSpeed)))))
                     if fanSpeed > 0 {
-                        try writeAll(fd: fd, bytes: frame(prefix + [216, 2, 1]))
+                        try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(43, 1))))
                     }
                 }
 
                 if let whoosh = cmd.whoosh {
-                    try writeAll(fd: fd, bytes: frame(prefix + [208, 3, whoosh ? 1 : 0]))
+                    try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(58, whoosh ? 1 : 0))))
                 }
 
                 if let eco = cmd.eco {
-                    try writeAll(fd: fd, bytes: frame(prefix + [136, 4, eco ? 1 : 0]))
+                    try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(65, eco ? 1 : 0))))
                 }
 
                 if let light = cmd.lightPercent {
                     let l = UInt8(max(0, min(100, light)))
                     let isOn: UInt8 = l > 0 ? 1 : 0
-                    try writeAll(fd: fd, bytes: frame(prefix + [160, 4, isOn]))
+                    try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(68, Int(isOn)))))
                     if isOn == 1 {
-                        try writeAll(fd: fd, bytes: frame(prefix + [168, 4, l]))
+                        try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyVarintField(69, Int(l)))))
                     }
                 }
             }
         } catch {
             fputs("Command error: \(error)\n", stderr)
+        }
+    }
+
+    func setFanName(_ newName: String) async throws {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            throw NSError(domain: "set-fan-name", code: 1, userInfo: [NSLocalizedDescriptionKey: "Name cannot be empty"])
+        }
+
+        try withSocket { fd in
+            try writeAll(fd: fd, bytes: frame(commitFrame(propertyBytes: propertyStringField(1, trimmed))))
+            usleep(300_000)
         }
     }
 }
@@ -622,7 +668,7 @@ func discoverFans() -> [FanConfig] {
         let ipLookup = runCommand("/usr/bin/dns-sd", ["-G", "v4", addressLookupHost], timeout: 3)
         let ip = parseIPv4Address(from: ipLookup) ?? resolved.host
 
-        let baseName = name.replacingOccurrences(of: "\\s+\\d{2}:\\d{2}:\\d{2}$", with: "", options: .regularExpression)
+        let baseName = name.replacingOccurrences(of: "\\s+[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}$", with: "", options: .regularExpression)
         fans.append(FanConfig(name: baseName, fanHost: ip, fanPort: resolved.port, lightName: nil, temperatureName: nil, humidityName: nil))
     }
 
@@ -637,9 +683,31 @@ func loadConfig(path: String) throws -> BridgeConfig {
 let args = Array(CommandLine.arguments.dropFirst())
 setbuf(stdout, nil)
 
+func parseSetFanNameArguments(_ args: [String]) -> (target: String, newName: String)? {
+    guard let idx = args.firstIndex(of: "--set-fan-name") else { return nil }
+    guard idx + 2 < args.count else {
+        fputs("Usage: --set-fan-name <fan-host-or-name> \"<new name>\"\n", stderr)
+        exit(2)
+    }
+    return (args[idx + 1], args[idx + 2])
+}
+
+func parseConfigPath(_ args: [String]) -> String {
+    var skipIndices = Set<Int>()
+    if let idx = args.firstIndex(of: "--set-fan-name"), idx + 2 < args.count {
+        skipIndices.insert(idx + 1)
+        skipIndices.insert(idx + 2)
+    }
+    for (idx, arg) in args.enumerated() where !arg.hasPrefix("--") && !skipIndices.contains(idx) {
+        return arg
+    }
+    return "Config/bridge-config.json"
+}
+
 let debugTelemetry = args.contains("--debug-telemetry")
 let printDeviceInfo = args.contains("--print-device-info")
 let discoverMode = args.contains("--discover")
+let setFanNameMode = parseSetFanNameArguments(args)
 
 if discoverMode {
     let fans = discoverFans()
@@ -651,12 +719,66 @@ if discoverMode {
     exit(0)
 }
 
-let configPath = args.first(where: { !$0.hasPrefix("--") }) ?? "Config/bridge-config.json"
+let configPath = parseConfigPath(args)
 let config = try loadConfig(path: configPath)
 
 if config.fans.isEmpty {
     fputs("Config error: fans array is empty\n", stderr)
     exit(1)
+}
+
+if let rename = setFanNameMode {
+    Task {
+        func uniquePorts(_ values: [Int]) -> [Int] {
+            var out: [Int] = []
+            var seen = Set<Int>()
+            for v in values where !seen.contains(v) {
+                seen.insert(v)
+                out.append(v)
+            }
+            return out
+        }
+
+        let match = config.fans.first(where: {
+            $0.fanHost == rename.target || $0.name.compare(rename.target, options: .caseInsensitive) == .orderedSame
+        })
+        let host = match?.fanHost ?? rename.target
+        let baseName = match?.name ?? rename.target
+        let ports = uniquePorts([31415, match?.fanPort ?? 31415, 31416])
+
+        var sentPorts: [Int] = []
+        var failures: [String] = []
+
+        for port in ports {
+            let targetFan = FanConfig(
+                name: baseName,
+                fanHost: host,
+                fanPort: port,
+                lightName: nil,
+                temperatureName: nil,
+                humidityName: nil
+            )
+
+            do {
+                let api = HaikuTCPAPI(config: targetFan)
+                try await api.setFanName(rename.newName)
+                sentPorts.append(port)
+            } catch {
+                failures.append("port \(port): \(error)")
+            }
+        }
+
+        if sentPorts.isEmpty {
+            fputs("Set name error: failed to send to \(host). " + failures.joined(separator: "; ") + "\n", stderr)
+            exit(1)
+        }
+
+        print("Set fan name command sent to \(host) on port(s): \(sentPorts.map(String.init).joined(separator: ", "))")
+        print("Requested name: \"\(rename.newName)\"")
+        print("Tip: run --discover after a few seconds to confirm the device-advertised name changed.")
+        exit(0)
+    }
+    dispatchMain()
 }
 
 if printDeviceInfo {

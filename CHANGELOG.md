@@ -12,6 +12,7 @@
 
 ### Added
 - `scripts/health-check.sh` for quick post-reboot verification of LaunchAgent state, config/binary presence, probe output, and recent error log checks.
+- `--set-fan-name <fan-host-or-name> "<new name>"` mode to send a device-name update command to a specific fan.
 
 ## 2025-02-28 — Protocol rewrite and HomeKit fix
 
