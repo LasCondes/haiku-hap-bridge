@@ -125,6 +125,16 @@ launchctl load ~/Library/LaunchAgents/com.andrew.haiku-hap-bridge.plist
 launchctl unload ~/Library/LaunchAgents/com.andrew.haiku-hap-bridge.plist
 ```
 
+Health check (use after reboot):
+```bash
+./scripts/health-check.sh
+```
+
+Optional config override:
+```bash
+./scripts/health-check.sh /ABS/PATH/bridge-config.json
+```
+
 ## Notes
 - Humidity sensors were removed — Haiku H/I Series fans report a sentinel value (100000) indicating no humidity sensor hardware.
 - The Bouke/HAP library ships with `pv=1.0` in its mDNS TXT record. This bridge patches it to `pv=1.1` for compatibility with modern HomeKit (iOS 16.2+). Without this fix, Apple Home shows "No Response" after pairing.

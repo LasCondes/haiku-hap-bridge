@@ -32,6 +32,15 @@ Other causes:
 - If those TXT keys are missing, the bridge skips that service as non-Haiku.
 - If `dns-sd` fails with "Service Not Running", run from a normal local macOS login session (not restricted sandbox/daemon context).
 
+## Quick post-reboot health check
+- Run:
+  `./scripts/health-check.sh`
+- The script verifies:
+  - LaunchAgent is loaded and running.
+  - Release binary and config file exist.
+  - One-shot `--print-device-info` probe returns fan blocks.
+  - Recent stderr log lines for status refresh errors.
+
 ## Fan unreachable / status refresh errors
 - Verify `fanHost` and `fanPort` in config.
 - Confirm fan is on same LAN and reachable from Mac.

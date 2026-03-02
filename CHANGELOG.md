@@ -10,6 +10,9 @@
 ### Changed
 - Discovery filtering now uses Haiku TXT signatures (`mac=`, `path=/FW...`) instead of only checking for "fan" in the instance name.
 
+### Added
+- `scripts/health-check.sh` for quick post-reboot verification of LaunchAgent state, config/binary presence, probe output, and recent error log checks.
+
 ## 2025-02-28 — Protocol rewrite and HomeKit fix
 
 ### Fixed
