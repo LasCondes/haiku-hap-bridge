@@ -1,5 +1,5 @@
 {
-  "originHash" : "9aeea941852871fd43d3a7d58701ec8d951f198b3290159d8138e988a3fa0930",
+  "originHash" : "2430f9fd5d7d20f3d2ae67463bdf93c31c866fec150c82f7282d6dc0078fcd63",
   "pins" : [
     {
       "identity" : "bigint",
@@ -15,7 +15,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/LasCondes/HAP.git",
       "state" : {
-        "revision" : "2af63825c4067929f54e76d5bcfc11a5f52b04ea"
+        "revision" : "e66f58e5a299bf5d4bcc09ec6f4830776e8b8732"
       }
     },
     {

@@ -8,7 +8,7 @@ let package = Package(
         .executable(name: "haiku-hap-bridge", targets: ["HaikuHAPBridge"])
     ],
     dependencies: [
-        .package(url: "https://github.com/LasCondes/HAP.git", revision: "2af63825c4067929f54e76d5bcfc11a5f52b04ea")
+        .package(url: "https://github.com/LasCondes/HAP.git", revision: "e66f58e5a299bf5d4bcc09ec6f4830776e8b8732")
     ],
     targets: [
         .executableTarget(
